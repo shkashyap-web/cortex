@@ -1,26 +1,72 @@
-import { 
-  DecisionRequest, 
-  DecisionResult, 
-  DecisionExplanation,
-  Recommendation,
-  Evidence,
-  ReasoningTrace,
-  AuditTrail,
+/**
+ * CORTEX Decision Engine (CORTEX DE)
+ * ---------------------------------------------------------------------------
+ * Milestone 3 — Modular Reasoning Pipeline.
+ *
+ * Responsibility
+ * --------------
+ * Orchestrates the enterprise Decision Pipeline (ARCHITECTURE.md /
+ * AI_ENGINEERING_RULES.md Section 9):
+ *
+ *   Request -> Context Engine -> Capability Resolution -> Agent Selection
+ *   -> Reasoner Resolution -> Reasoning -> Confidence/Ranking
+ *   -> Explainability -> Audit -> Memory -> Event Publish -> Response
+ *
+ * What changed from Sprint 1
+ * ---------------------------
+ * DecisionEngineService previously assembled its own context ad hoc
+ * (direct memoryEngine/agentRegistry calls) and computed a mock score by
+ * pattern-matching the entity ID string. It now:
+ *
+ *   1. Delegates context assembly entirely to ContextEngine (Milestone 2),
+ *      instead of re-implementing a subset of it here.
+ *   2. Resolves the required AgentCapability from
+ *      config/decisionCapabilityMap.ts instead of a hardcoded switch.
+ *   3. Selects the eligible agent by priority + health (Milestone 2
+ *      AgentPluginMetadata fields) instead of taking eligibleAgents[0].
+ *   4. Delegates all actual reasoning/scoring to a pluggable
+ *      IDecisionReasoner resolved through ReasonerRegistry, instead of
+ *      computing a mock score inline. See services/cortex-de/bootstrap.ts
+ *      and services/cortex-de/reasoners/ for how domains plug in.
+ *   5. Ranks recommendations/alternatives by confidence before returning.
+ *   6. Wraps the full pipeline in error handling that publishes a
+ *      DecisionFailed event on failure instead of throwing silently past
+ *      observability.
+ *
+ * This file is deliberately domain-agnostic: it contains no Risk, Fraud,
+ * Lending, or MSME-specific logic. Every future business domain is added
+ * by implementing IDecisionReasoner and registering it in bootstrap.ts —
+ * never by editing this file.
+ */
+
+import {
+  AgentPluginMetadata,
   AlternativeRecommendation,
-  BankingEntityType,
-  AgentPluginMetadata
+  AuditTrail,
+  DecisionRequest,
+  DecisionResult,
+  Evidence,
+  ReasoningTrace
 } from '@/types';
 import { observabilityService } from '../observability/ObservabilityService';
 import { memoryEngine } from '../memory/MemoryEngine';
 import { explainabilityEngine } from '../explainability/ExplainabilityEngine';
 import { agentRegistryService } from '../agent/AgentRegistry';
-import { workflowEngine } from '../workflow/WorkflowEngine';
 import { eventBus } from '../event-bus/EventBus';
+import { contextEngine } from '../context/ContextEngine';
+import { reasonerRegistryService } from './ReasonerRegistry';
+import { defaultReasoner } from './reasoners/DefaultReasoner';
+import { resolveRequiredCapability } from '@/config/decisionCapabilityMap';
+import { bootstrapReasoners } from './bootstrap';
 
 export class DecisionEngineService {
   private static instance: DecisionEngineService;
 
-  private constructor() {}
+  private constructor() {
+    // Ensure built-in reasoners (Risk today; more per future milestone)
+    // are registered before the first decision is ever evaluated.
+    bootstrapReasoners();
+  }
 
   public static getInstance(): DecisionEngineService {
     if (!DecisionEngineService.instance) {
@@ -39,222 +85,195 @@ export class DecisionEngineService {
 
     console.log(`[CORTEX-DE] Beginning Decision Pipeline evaluation for ID: ${decisionId} (Correlation: ${correlationId})`);
 
-    // Reasoning Trace compiler
-    const reasoningTraceSteps: ReasoningTrace['steps'] = [];
-    const evidenceList: Evidence[] = [];
-
     return observabilityService.measure(
       'cortex-de',
       `evaluate-${request.decisionType}`,
       async () => {
-        // 1. Context Builder
-        reasoningTraceSteps.push({
-          observation: `Request type: ${request.decisionType} for Entity: ${request.entityType} (${request.entityId})`,
-          thought: 'Initializing decision context parameters and validating input structures.',
-          timestamp: new Date().toISOString()
-        });
+        try {
+          return await this.runPipeline(request, decisionId, correlationId, startTime);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          console.error(`[CORTEX-DE] Decision Pipeline FAILED for ${decisionId}: ${reason}`);
 
-        // 2. Enterprise Memory Engine recall
-        const recalledMemory = await memoryEngine.recall('CustomerMemory', request.entityId);
-        reasoningTraceSteps.push({
-          thought: `Querying Enterprise Memory Engine for relevant historical traces on entity ${request.entityId}.`,
-          observation: `Recalled ${recalledMemory.length} memory entries from storage.`,
-          timestamp: new Date().toISOString()
-        });
-        recalledMemory.forEach(mem => {
-          evidenceList.push({
-            sourceType: 'MEMORY',
-            sourceId: mem.id,
-            description: mem.summary,
-            dataSnapshot: mem.value
+          await eventBus.publish({
+            id: `EVT-DEC-${Math.random().toString(36).substr(2, 9)}`,
+            type: 'DecisionFailed',
+            timestamp: new Date().toISOString(),
+            source: 'cortex-de',
+            payload: { decisionId, requestId: request.id, entityId: request.entityId, reason },
+            correlationId
           });
-        });
 
-        // 3. Knowledge Graph extraction (Mocked network query)
-        reasoningTraceSteps.push({
-          thought: 'Resolving entity links and dependency paths in the Knowledge Graph.',
-          observation: 'Discovered owner links and guarantor connections for credit verification.',
-          timestamp: new Date().toISOString()
-        });
-
-        // 4. Digital Twin Resolver
-        reasoningTraceSteps.push({
-          thought: 'Triggering Digital Twin simulation to compare current state values with baseline forecasts.',
-          observation: 'Digital Twin status: WARNING. Liquidity ratios projections indicate potential collateral shortfalls.',
-          timestamp: new Date().toISOString()
-        });
-
-        // 5. Capability Resolution
-        const requiredCapability = this.determineRequiredCapability(request.decisionType);
-        reasoningTraceSteps.push({
-          thought: `Resolving required operational capability mapping for request: ${request.decisionType}.`,
-          observation: `Required capability determined: "${requiredCapability}".`,
-          timestamp: new Date().toISOString()
-        });
-
-        // 6. AI Agent Selection (Registry check)
-        const eligibleAgents = agentRegistryService.discoverAgentsByCapability(requiredCapability);
-        const primaryAgent = eligibleAgents[0];
-        if (!primaryAgent) {
-          throw new Error(`No active agents found in registry supporting capability: ${requiredCapability}`);
+          throw error;
         }
-        reasoningTraceSteps.push({
-          thought: `Selecting best suited AI Agent Plugin for capability "${requiredCapability}".`,
-          observation: `Selected Agent: "${primaryAgent.name}" (ID: ${primaryAgent.id}, Status: ${primaryAgent.status}).`,
-          timestamp: new Date().toISOString()
-        });
-
-        // 7. Workflow Validation
-        reasoningTraceSteps.push({
-          thought: 'Checking workflow status and reviewing RBAC credentials for current operational step.',
-          observation: 'Workflow instance status matches active guidelines. Approval clearance confirmed.',
-          timestamp: new Date().toISOString()
-        });
-
-        // 8. Decision Reasoning (Simulate processing delay)
-        const delay = Math.floor(Math.random() * 200) + 100;
-        await new Promise(resolve => setTimeout(resolve, delay));
-        
-        const overallScore = this.calculateMockDecisionScore(request.decisionType, request.entityId);
-        const statusResult = overallScore >= 70 ? 'APPROVED' : (overallScore >= 40 ? 'MANUAL_REVIEW' : 'REJECTED');
-
-        reasoningTraceSteps.push({
-          agentId: primaryAgent.id,
-          capabilityName: requiredCapability,
-          thought: `Executing core reasoning logic on parsed variables. Overall evaluated score matches benchmark requirements.`,
-          observation: `Reasoning complete. Target output score: ${overallScore}/100. Status: ${statusResult}.`,
-          timestamp: new Date().toISOString()
-        });
-
-        // 9. Explainability Engine Trace Compilation
-        const auditTrail: AuditTrail = {
-          operatorId: request.initiatorId,
-          action: `DECISION_EVALUATE_${request.decisionType}`,
-          timestamp: new Date().toISOString()
-        };
-
-        const primaryRecommendation = this.generateRecommendation(request.decisionType, statusResult, overallScore);
-        const alternatives = explainabilityEngine.compileMockAlternatives(primaryRecommendation);
-
-        const explanation = explainabilityEngine.generateExplanation(
-          decisionId,
-          `The decision resolved as ${statusResult} based on credit checks scoring ${overallScore}/100. Verification checks completed through the ${primaryAgent.name} plugin.`,
-          evidenceList,
-          { steps: reasoningTraceSteps },
-          auditTrail,
-          alternatives
-        );
-
-        // 10. Recommendation Generation & Audit Logging
-        const result: DecisionResult = {
-          decisionId,
-          requestId: request.id,
-          entityId: request.entityId,
-          status: statusResult,
-          confidenceScore: overallScore / 100,
-          recommendations: [primaryRecommendation],
-          explanation,
-          evaluatedAt: new Date().toISOString()
-        };
-
-        // Store evaluation result in Memory History
-        await memoryEngine.store(
-          'DecisionHistory',
-          request.entityId,
-          decisionId,
-          result as any,
-          `Decision ${request.decisionType} completed with status ${statusResult}. Confidence Score: ${(result.confidenceScore * 100).toFixed(0)}%.`,
-          9,
-          ['decision', request.decisionType]
-        );
-
-        // Publish Completed Event
-        await eventBus.publish({
-          id: `EVT-DEC-${Math.random().toString(36).substr(2, 9)}`,
-          type: 'DecisionCompleted',
-          timestamp: new Date().toISOString(),
-          source: 'cortex-de',
-          payload: { decisionId, status: statusResult, entityId: request.entityId },
-          correlationId
-        });
-
-        const totalDuration = performance.now() - startTime;
-        console.log(`[CORTEX-DE] Decision Pipeline complete for ${decisionId} in ${totalDuration.toFixed(2)}ms.`);
-        
-        return result;
       },
       { requestId: request.id, decisionType: request.decisionType }
     );
   }
 
   /**
-   * Helper mapping decision types to operational capabilities.
+   * The actual pipeline. Split out from evaluateDecision so the outer
+   * method's only job is timing + error-boundary handling.
    */
-  private determineRequiredCapability(decisionType: string): string {
-    switch (decisionType) {
-      case 'LOAN_APPROVAL':
-        return 'CreditAssessment';
-      case 'FRAUD_CHECK':
-        return 'FraudDetection';
-      case 'PORTFOLIO_OPTIMIZE':
-        return 'PortfolioOptimisation';
-      case 'MSME_CASHFLOW':
-        return 'CashFlowForecasting';
-      default:
-        return 'RecommendationGeneration';
+  private async runPipeline(
+    request: DecisionRequest,
+    decisionId: string,
+    correlationId: string,
+    startTime: number
+  ): Promise<DecisionResult> {
+    const reasoningTraceSteps: ReasoningTrace['steps'] = [];
+
+    // 1. Context Assembly — delegated entirely to ContextEngine (Milestone 2).
+    reasoningTraceSteps.push({
+      observation: `Request type: ${request.decisionType} for Entity: ${request.entityType} (${request.entityId})`,
+      thought: 'Initializing decision context parameters and validating input structures.',
+      timestamp: new Date().toISOString()
+    });
+
+    const context = await contextEngine.assembleContext({
+      entityType: request.entityType,
+      entityId: request.entityId,
+      correlationId,
+      initiatorId: request.initiatorId,
+      decisionType: request.decisionType
+    });
+
+    reasoningTraceSteps.push({
+      thought: 'Assembled unified DecisionContext via Context Engine (Memory, Agents, Capabilities, RBAC, Workflow, recent Events).',
+      observation: `Context ${context.contextId}: ${context.memory.length} memory entries, ${context.capabilities.length} relevant capabilities, ${context.agents.length} candidate agents.`,
+      timestamp: new Date().toISOString()
+    });
+
+    // 2. Capability Resolution — config-driven, not a hardcoded switch.
+    const requiredCapability = resolveRequiredCapability(request.decisionType);
+    reasoningTraceSteps.push({
+      thought: `Resolving required operational capability for request type "${request.decisionType}" via config/decisionCapabilityMap.ts.`,
+      observation: `Required capability determined: "${requiredCapability}".`,
+      timestamp: new Date().toISOString()
+    });
+
+    // 3. Agent Selection — prioritized and health-aware.
+    const primaryAgent = this.selectAgent(requiredCapability, context.agents);
+    if (!primaryAgent) {
+      throw new Error(`No active, healthy agent found in registry supporting capability: ${requiredCapability}`);
     }
-  }
+    reasoningTraceSteps.push({
+      agentId: primaryAgent.id,
+      capabilityName: requiredCapability,
+      thought: `Selected the highest-priority healthy agent supporting capability "${requiredCapability}" from ${context.agents.length} candidates.`,
+      observation: `Selected Agent: "${primaryAgent.name}" (ID: ${primaryAgent.id}, Priority: ${primaryAgent.priority}, Health: ${primaryAgent.health}, Status: ${primaryAgent.status}).`,
+      timestamp: new Date().toISOString()
+    });
 
-  /**
-   * Computes a mock score based on entity id for consistent demonstration results.
-   */
-  private calculateMockDecisionScore(decisionType: string, entityId: string): number {
-    if (entityId.includes('001')) return 85; // CUST-001 or MSME-001 (High Score)
-    if (entityId.includes('002')) return 92;
-    if (entityId.includes('003')) return 55; // Borderline score -> Manual review
-    if (entityId.includes('004')) return 22; // Low score -> Reject
-    return 75;
-  }
+    // 4. Reasoner Resolution — pluggable, resolved through the registry.
+    const reasoner =
+      reasonerRegistryService.getReasonerForDecisionType(request.decisionType, requiredCapability) ?? defaultReasoner;
+    reasoningTraceSteps.push({
+      capabilityName: reasoner.capability,
+      thought: `Resolved reasoning plugin for decisionType "${request.decisionType}".`,
+      observation: `Reasoner selected: "${reasoner.name}".`,
+      timestamp: new Date().toISOString()
+    });
 
-  /**
-   * Generates a structural recommendation.
-   */
-  private generateRecommendation(decisionType: string, status: string, score: number): Recommendation {
-    const id = `REC-DEC-${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
-    if (decisionType === 'LOAN_APPROVAL') {
-      if (status === 'APPROVED') {
-        return {
-          id,
-          title: 'Disburse Working Capital',
-          description: `Disburse approved loan amount under standard rate terms. Interest rate suggested: 10.25% based on risk score: ${score}/100.`,
-          confidenceScore: 0.94,
-          impactMetric: '+1.5% Asset Expansion'
-        };
-      } else if (status === 'MANUAL_REVIEW') {
-        return {
-          id,
-          title: 'Request Co-Signatures',
-          description: `Credit score of ${score}/100 warrants secondary backing. Require personal guarantees or co-signatures from Patel Agro owner.`,
-          confidenceScore: 0.72,
-          impactMetric: 'Risk mitigation'
-        };
-      } else {
-        return {
-          id,
-          title: 'Reject Credit Application',
-          description: `Application score of ${score}/100 is below credit policy margins. High probability of default detected.`,
-          confidenceScore: 0.88,
-          impactMetric: 'Loss prevention'
-        };
-      }
-    }
+    // 5. Reasoning — fully delegated to the resolved IDecisionReasoner.
+    const reasonerOutput = await reasoner.reason({ request, context });
+    reasoningTraceSteps.push(...reasonerOutput.traceSteps);
 
-    return {
-      id,
-      title: 'Authorize Operational Override',
-      description: 'Proceed with normal transaction cycles under monitoring status.',
-      confidenceScore: 0.85
+    // 6. Decision Ranking — alternatives sorted by descending confidence.
+    const rankedAlternatives: AlternativeRecommendation[] = [...reasonerOutput.alternatives].sort(
+      (a, b) => b.recommendation.confidenceScore - a.recommendation.confidenceScore
+    );
+
+    // 7. Audit + Explainability.
+    const auditTrail: AuditTrail = {
+      operatorId: request.initiatorId,
+      action: `DECISION_EVALUATE_${request.decisionType}`,
+      timestamp: new Date().toISOString()
     };
+
+    const evidence: Evidence[] = [
+      ...reasonerOutput.evidence,
+      ...context.memory.slice(0, 5).map(mem => ({
+        sourceType: 'MEMORY' as const,
+        sourceId: mem.id,
+        description: mem.summary,
+        dataSnapshot: mem.value
+      }))
+    ];
+
+    const explanation = explainabilityEngine.generateExplanation(
+      decisionId,
+      `The decision resolved as ${reasonerOutput.status} with a confidence score of ${reasonerOutput.score}/100, evaluated by "${reasoner.name}" via the ${primaryAgent.name} agent.`,
+      evidence,
+      { steps: reasoningTraceSteps },
+      auditTrail,
+      rankedAlternatives
+    );
+
+    // 8. Recommendation Generation & Result Assembly.
+    const result: DecisionResult = {
+      decisionId,
+      requestId: request.id,
+      entityId: request.entityId,
+      status: reasonerOutput.status,
+      confidenceScore: reasonerOutput.score / 100,
+      recommendations: [reasonerOutput.primaryRecommendation],
+      explanation,
+      evaluatedAt: new Date().toISOString()
+    };
+
+    // 9. Persist to Memory History.
+    await memoryEngine.store(
+      'DecisionHistory',
+      request.entityId,
+      decisionId,
+      result as any,
+      `Decision ${request.decisionType} completed with status ${result.status}. Confidence Score: ${(result.confidenceScore * 100).toFixed(0)}%.`,
+      9,
+      ['decision', request.decisionType]
+    );
+
+    // 10. Publish Completed Event.
+    await eventBus.publish({
+      id: `EVT-DEC-${Math.random().toString(36).substr(2, 9)}`,
+      type: 'DecisionCompleted',
+      timestamp: new Date().toISOString(),
+      source: 'cortex-de',
+      payload: { decisionId, status: result.status, entityId: request.entityId },
+      correlationId
+    });
+
+    const totalDuration = performance.now() - startTime;
+    console.log(`[CORTEX-DE] Decision Pipeline complete for ${decisionId} in ${totalDuration.toFixed(2)}ms.`);
+
+    return result;
+  }
+
+  /**
+   * Selects the best-suited agent for a capability from a candidate list,
+   * falling back to a full registry scan if the Context Engine's
+   * candidate list (which is scoped by capability/entity relevance) came
+   * back empty. Prioritization: capability match required; among
+   * matches, HEALTHY agents are preferred over DEGRADED, and lower
+   * `priority` value wins (matches AgentPluginMetadata's documented
+   * "lower value = higher priority" convention from Milestone 2).
+   */
+  private selectAgent(capability: string, candidates: AgentPluginMetadata[]): AgentPluginMetadata | undefined {
+    const pool = candidates.length > 0 ? candidates : agentRegistryService.getAllAgents();
+
+    const eligible = pool.filter(
+      agent => agent.capabilities.includes(capability as any) && agent.status !== 'OFFLINE' && agent.health !== 'UNHEALTHY'
+    );
+
+    if (eligible.length === 0) return undefined;
+
+    const healthRank: Record<string, number> = { HEALTHY: 0, DEGRADED: 1, UNHEALTHY: 2 };
+
+    return [...eligible].sort((a, b) => {
+      const healthDiff = healthRank[a.health] - healthRank[b.health];
+      if (healthDiff !== 0) return healthDiff;
+      return a.priority - b.priority;
+    })[0];
   }
 }
 

@@ -9,7 +9,14 @@ export * from './memory/MemoryEngine';
 export * from './explainability/ExplainabilityEngine';
 export * from './workflow/WorkflowEngine';
 export * from './agent/AgentRegistry';
+export * from './capability/CapabilityRegistry';
+export * from './context/ContextEngine';
 export * from './cortex-de/DecisionEngine';
+export * from './cortex-de/ReasonerRegistry';
+export * from './cortex-de/ConfidenceScoring';
+export * from './cortex-de/reasoners/RiskReasoner';
+export * from './cortex-de/reasoners/DefaultReasoner';
+export * from './cortex-de/bootstrap';
 
 // Business stubs
 export * from './business/CustomerService';

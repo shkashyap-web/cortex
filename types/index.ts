@@ -276,7 +276,19 @@ export type EventType =
   | 'SimulationCompleted'
   | 'RecommendationGenerated'
   | 'DecisionCompleted'
-  | 'DocumentProcessed';
+  | 'DocumentProcessed'
+  // Milestone 2 — Enterprise Infrastructure Layer lifecycle events
+  | 'MemoryStored'
+  | 'MemoryDeleted'
+  | 'CapabilityRegistered'
+  | 'CapabilityUnregistered'
+  | 'AgentRegistered'
+  | 'AgentUnregistered'
+  | 'AgentHealthChanged'
+  | 'ContextAssembled'
+  // Milestone 3 — Decision Engine reasoning pipeline lifecycle events
+  | 'ReasonerRegistered'
+  | 'DecisionFailed';
 
 export interface CortexEvent<T = any> {
   id: string;
@@ -295,6 +307,217 @@ export interface Subscription {
   type: EventType;
   callback: EventCallback;
   subscriberName: string;
+}
+
+/**
+ * Maps every EventType to its expected payload shape.
+ *
+ * This is the single source of truth for "what data travels with which
+ * event" across the Enterprise Event Bus. Every publisher and subscriber
+ * should resolve payload types from this map rather than casting `any`,
+ * satisfying the "strongly typed events" requirement of the Event Bus
+ * subsystem without altering the existing EventType union or CortexEvent
+ * shape (both remain backward compatible with current publishers).
+ */
+export interface EventPayloadMap {
+  TransactionCreated: {
+    transactionId: string;
+    accountId: string;
+    amount: number;
+    type: Transaction['type'];
+  };
+  LoanRequested: {
+    loanId: string;
+    entityType: 'Customer' | 'MSME';
+    entityId: string;
+    amount: number;
+  };
+  LoanApproved: {
+    loanId: string;
+    entityId: string;
+    amount: number;
+    approvedBy: string;
+  };
+  FraudAlertGenerated: {
+    fraudCaseId: string;
+    customerId: string;
+    score: number;
+    riskLevel: FraudCase['riskLevel'];
+  };
+  CustomerUpdated: {
+    customerId: string;
+    changedFields: string[];
+  };
+  MSMEUpdated: {
+    msmeId: string;
+    changedFields: string[];
+  };
+  DigitalTwinUpdated: {
+    twinId: string;
+    entityType: DigitalTwin['entityType'];
+    entityId: string;
+  };
+  SimulationCompleted: {
+    scenarioId: string;
+    executedBy: string;
+    status: SimulationScenario['status'];
+  };
+  RecommendationGenerated: {
+    recommendationId: string;
+    entityId: string;
+    confidenceScore: number;
+  };
+  DecisionCompleted: {
+    decisionId: string;
+    status: string;
+    entityId: string;
+  };
+  DocumentProcessed: {
+    documentId: string;
+    entityType: BankingEntityType;
+    entityId: string;
+    type: Document['type'];
+  };
+  MemoryStored: {
+    memoryId: string;
+    type: MemoryType;
+    entityId: string;
+  };
+  MemoryDeleted: {
+    memoryId: string;
+    type: MemoryType;
+    entityId: string;
+  };
+  CapabilityRegistered: {
+    capabilityId: string;
+    name: string;
+  };
+  CapabilityUnregistered: {
+    capabilityId: string;
+  };
+  AgentRegistered: {
+    agentId: string;
+    name: string;
+  };
+  AgentUnregistered: {
+    agentId: string;
+  };
+  AgentHealthChanged: {
+    agentId: string;
+    health: AgentHealthStatus;
+    status: AgentStatus;
+  };
+  ContextAssembled: {
+    contextId: string;
+    entityType: BankingEntityType;
+    entityId: string;
+    correlationId: string;
+  };
+  ReasonerRegistered: {
+    capability: AgentCapability;
+    decisionTypes: string[];
+  };
+  DecisionFailed: {
+    decisionId: string;
+    requestId: string;
+    entityId: string;
+    reason: string;
+  };
+}
+
+/**
+ * A CortexEvent whose `type` and `payload` are bound together through
+ * EventPayloadMap, giving publishers and subscribers full compile-time
+ * safety for a specific EventType `K`.
+ */
+export type TypedCortexEvent<K extends EventType> = Omit<CortexEvent<EventPayloadMap[K]>, 'type'> & {
+  type: K;
+};
+
+export type TypedEventCallback<K extends EventType> = (
+  event: TypedCortexEvent<K>
+) => void | Promise<void>;
+
+/**
+ * Public contract for the Enterprise Event Bus.
+ *
+ * Per AI_ENGINEERING_RULES.md Section 6 ("Services must expose
+ * interfaces, hide implementation details"), every core engine is
+ * expected to be consumed through an interface rather than a concrete
+ * class. Business services and agents should depend on IEventBus, not
+ * on the EventBus implementation class directly.
+ */
+export interface IEventBus {
+  subscribe<K extends EventType>(
+    type: K,
+    subscriberName: string,
+    callback: TypedEventCallback<K>
+  ): string;
+
+  unsubscribe(type: EventType, id: string): boolean;
+
+  unsubscribeAll(subscriberName: string): number;
+
+  publish<K extends EventType>(event: TypedCortexEvent<K>): Promise<void>;
+
+  getSubscriberCount(type: EventType): number;
+
+  getActiveSubscriptions(type?: EventType): ReadonlyArray<Subscription>;
+
+  /**
+   * Returns recently published events, most recent first, optionally
+   * filtered by type. Backed by a bounded in-memory ring buffer — this is
+   * situational awareness for engines like the Context Engine, not a
+   * durable event log or audit trail.
+   */
+  getRecentEvents(type?: EventType, limit?: number): ReadonlyArray<CortexEvent>;
+}
+
+/**
+ * Storage abstraction for the Memory Engine.
+ *
+ * The Memory Engine depends on this interface, never on a concrete
+ * storage technology (dependency inversion). The default implementation
+ * shipped in Sprint/Milestone 2 is in-process and non-persistent; a
+ * future Postgres-, Redis-, or vector-backed repository can implement
+ * this same interface and be swapped in via constructor injection
+ * without any change to IMemoryEngine consumers (DecisionEngine,
+ * ContextEngine, business services, etc.).
+ */
+export interface IMemoryRepository {
+  create(entry: MemoryEntry): Promise<MemoryEntry>;
+  findByTypeAndEntity(type: MemoryType, entityId: string): Promise<MemoryEntry[]>;
+  findById(id: string): Promise<MemoryEntry | undefined>;
+  update(
+    id: string,
+    patch: Partial<Pick<MemoryEntry, 'value' | 'summary' | 'importance' | 'tags'>>
+  ): Promise<MemoryEntry | undefined>;
+  delete(id: string): Promise<boolean>;
+  list(filter?: { type?: MemoryType }): Promise<MemoryEntry[]>;
+}
+
+/**
+ * Public contract for the Enterprise Memory Engine. Business services and
+ * other engines (Context Engine, Decision Engine) depend on this
+ * interface rather than the concrete MemoryEngine class.
+ */
+export interface IMemoryEngine {
+  recall(type: MemoryType, entityId: string): Promise<MemoryEntry[]>;
+  store(
+    type: MemoryType,
+    entityId: string,
+    key: string,
+    value: Record<string, any>,
+    summary: string,
+    importance?: number,
+    tags?: string[]
+  ): Promise<MemoryEntry>;
+  update(
+    id: string,
+    patch: Partial<Pick<MemoryEntry, 'value' | 'summary' | 'importance' | 'tags'>>
+  ): Promise<MemoryEntry | undefined>;
+  delete(id: string): Promise<boolean>;
+  search(query: string, limit?: number): Promise<MemoryEntry[]>;
 }
 
 // ==========================================
@@ -443,6 +666,13 @@ export type AgentCapability =
   | 'RecommendationGeneration'
   | 'SimulationExecution';
 
+/**
+ * Runtime health of an agent, distinct from its operational `AgentStatus`.
+ * Status describes what the agent is doing (idle/busy/offline); health
+ * describes whether it is functioning correctly.
+ */
+export type AgentHealthStatus = 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY';
+
 export interface AgentPluginMetadata {
   id: string;
   name: string;
@@ -455,6 +685,26 @@ export interface AgentPluginMetadata {
   permissions: Permission[];
   futureTools: string[];
   version: string;
+  /** Selection priority when multiple agents are eligible for a capability. Lower value = higher priority. */
+  priority: number;
+  /** Current operational health, distinct from status (idle/busy/offline). */
+  health: AgentHealthStatus;
+}
+
+/**
+ * Public contract for the Agent Registry.
+ * Agents are plugins: nothing in CORTEX should hardcode agent execution or
+ * agent identity — everything is resolved through this registry.
+ */
+export interface IAgentRegistry {
+  registerAgent(agent: AgentPluginMetadata): void;
+  unregisterAgent(agentId: string): boolean;
+  discoverAgentsByCapability(capability: string): AgentPluginMetadata[];
+  discoverAgentsByEvent(eventType: EventType): AgentPluginMetadata[];
+  updateAgentStatus(agentId: string, status: AgentStatus): boolean;
+  updateAgentHealth(agentId: string, health: AgentHealthStatus): boolean;
+  getAllAgents(): AgentPluginMetadata[];
+  getAgent(id: string): AgentPluginMetadata | undefined;
 }
 
 export interface CapabilityDefinition {
@@ -586,4 +836,270 @@ export interface IntegrationResponse<T = any> {
   data?: T;
   error?: string;
   latencyMs: number;
+}
+
+// ==========================================
+// 13. Enterprise Capability Registry
+// ==========================================
+/**
+ * Identifies a top-level enterprise business capability (a "module" of
+ * the platform), as distinct from AgentCapability (an individual skill
+ * an agent plugin performs, e.g. 'CreditAssessment'). This is the
+ * capability catalogue referenced in ARCHITECTURE.md / README.md:
+ * Wealth Advisory, Retail Lending, Fraud Detection, Risk Intelligence,
+ * Compliance, Executive Analytics, and related modules.
+ */
+export type EnterpriseCapabilityId =
+  | 'CustomerIntelligence'
+  | 'RetailLending'
+  | 'MSMEIntelligence'
+  | 'WealthIntelligence'
+  | 'FraudIntelligence'
+  | 'RiskIntelligence'
+  | 'ComplianceIntelligence'
+  | 'DecisionIntelligence'
+  | 'ExecutiveIntelligence'
+  | 'DocumentIntelligence'
+  | 'SimulationEngine'
+  | 'KnowledgeGraph'
+  | 'DigitalTwin';
+
+export type EnterpriseCapabilityStatus = 'ACTIVE' | 'BETA' | 'DISABLED';
+
+export interface EnterpriseCapabilityMetadata {
+  id: EnterpriseCapabilityId;
+  name: string;
+  description: string;
+  supportedEntities: BankingEntityType[];
+  requiredServices: string[];
+  requiredPermissions: Permission[];
+  supportedWorkflows: WorkflowType[];
+  featureFlags: string[];
+  status: EnterpriseCapabilityStatus;
+}
+
+/**
+ * Public contract for the Capability Registry. Capability availability
+ * must always be discovered through this registry — never hardcoded
+ * into UI, workflows, or agents (AI_ENGINEERING_RULES.md Section 13).
+ */
+export interface ICapabilityRegistry {
+  register(capability: EnterpriseCapabilityMetadata): void;
+  unregister(id: EnterpriseCapabilityId): boolean;
+  discover(filter: {
+    supportedEntity?: BankingEntityType;
+    requiredService?: string;
+    workflow?: WorkflowType;
+    status?: EnterpriseCapabilityStatus;
+  }): EnterpriseCapabilityMetadata[];
+  list(): EnterpriseCapabilityMetadata[];
+  getById(id: EnterpriseCapabilityId): EnterpriseCapabilityMetadata | undefined;
+}
+
+// ==========================================
+// 14. Enterprise Context Engine
+// ==========================================
+/**
+ * Lightweight, non-authoritative reference to a Knowledge Graph node.
+ * The Knowledge Graph Service itself is out of scope for Milestone 2
+ * (per explicit instruction); this shape lets the Context Engine carry
+ * a placeholder reference today that can be populated with real graph
+ * data once services/knowledge-graph/ is implemented in a later
+ * milestone, without changing DecisionContext's shape.
+ */
+export interface KnowledgeGraphReference {
+  nodeId: string;
+  entityType: BankingEntityType;
+  relation: string;
+  note: string;
+}
+
+/**
+ * Lightweight, non-authoritative reference to a Digital Twin. Real twin
+ * data (metrics, predictions) will populate this once
+ * services/digital-twin/ exists; Milestone 2 only carries the
+ * reference/placeholder shape.
+ */
+export interface DigitalTwinReference {
+  entityType: 'Customer' | 'MSME' | 'Branch' | 'Portfolio' | 'Executive';
+  entityId: string;
+  note: string;
+}
+
+/**
+ * Everything the Decision Engine needs to reason about a request,
+ * assembled ahead of time by the Context Engine. The Context Engine
+ * performs NO reasoning — it only gathers and shapes existing state
+ * from other engines into this single object.
+ */
+export interface DecisionContext {
+  contextId: string;
+  correlationId: string;
+  entityType: BankingEntityType;
+  entityId: string;
+
+  /** Resolved primary entity snapshot, when the entity is a Customer or MSME. */
+  entitySnapshot?: Customer | MSME;
+
+  /** Enterprise Memory Engine context relevant to this entity. */
+  memory: MemoryEntry[];
+
+  /** Placeholder Knowledge Graph references (see KnowledgeGraphReference). */
+  knowledgeGraphRefs: KnowledgeGraphReference[];
+
+  /** Placeholder Digital Twin references (see DigitalTwinReference). */
+  digitalTwinRefs: DigitalTwinReference[];
+
+  /** Enterprise capabilities relevant to the requested entity/workflow. */
+  capabilities: EnterpriseCapabilityMetadata[];
+
+  /** Agents eligible to act on this context. */
+  agents: AgentPluginMetadata[];
+
+  /** Active workflow instance driving this request, if any. */
+  currentWorkflow?: WorkflowInstance;
+
+  /** Caller's current RBAC context (role + permissions + workspace access). */
+  accessControl: AccessControlContext;
+
+  /** Recent bus activity relevant to this entity, for situational awareness. */
+  recentEvents: CortexEvent[];
+
+  /** Prior decisions recorded in Memory for this entity. */
+  decisionHistory: MemoryEntry[];
+
+  /** Prior recommendations recorded in Memory for this entity. */
+  recommendationHistory: MemoryEntry[];
+
+  assembledAt: string;
+}
+
+export interface ContextAssemblyRequest {
+  entityType: BankingEntityType;
+  entityId: string;
+  correlationId: string;
+  initiatorId: string;
+  /** Optional decisionType hint, used to narrow which capabilities/agents are relevant. */
+  decisionType?: string;
+}
+
+/**
+ * Public contract for the Enterprise Context Engine. This engine
+ * assembles a DecisionContext; it must never perform reasoning,
+ * scoring, or recommendation generation — that remains the exclusive
+ * responsibility of the CORTEX Decision Engine.
+ */
+export interface IContextEngine {
+  assembleContext(request: ContextAssemblyRequest): Promise<DecisionContext>;
+}
+
+// ==========================================
+// 15. Decision Reasoner Plugin Framework (Milestone 3)
+// ==========================================
+/**
+ * Business-domain reasoning plugin contract.
+ *
+ * This is the extension point business domains (Risk, Fraud, Lending,
+ * MSME, Wealth, Compliance, Executive Intelligence, ...) implement to
+ * plug real reasoning into the CORTEX Decision Engine. Per
+ * AI_ENGINEERING_RULES.md Section 12 ("Agents are plugins... never
+ * hardcode them"), the same principle is applied one layer down: the
+ * *reasoning logic* behind a decision is also a plugin, resolved at
+ * runtime through the ReasonerRegistry rather than hardcoded inside
+ * DecisionEngineService.
+ *
+ * A future domain (e.g. Fraud) plugs in by:
+ *   1. Implementing IDecisionReasoner (see reasoners/RiskReasoner.ts for
+ *      a reference implementation).
+ *   2. Registering an instance with reasonerRegistryService.register(...)
+ *      (see services/cortex-de/bootstrap.ts).
+ *   3. Optionally adding a decisionType -> AgentCapability mapping entry
+ *      in config/decisionCapabilityMap.ts.
+ *
+ * DecisionEngineService itself is never modified to add a new domain.
+ */
+export interface IDecisionReasoner {
+  /** The AgentCapability this reasoner provides reasoning for (e.g. 'RiskScoring'). */
+  readonly capability: AgentCapability;
+
+  /** Human-readable name, surfaced in reasoning traces and observability. */
+  readonly name: string;
+
+  /**
+   * Decision types this reasoner is able to evaluate (e.g. 'LOAN_APPROVAL').
+   * The ReasonerRegistry uses this to resolve which reasoner handles a
+   * given DecisionRequest — no switch/if-chain lives in DecisionEngine.
+   */
+  supportsDecisionType(decisionType: string): boolean;
+
+  /**
+   * Performs the actual reasoning for a request, given the fully
+   * assembled DecisionContext. Must not throw for ordinary "insufficient
+   * data" situations — return a low-confidence ReasonerOutput with
+   * explanatory evidence instead; throw only for genuine faults.
+   */
+  reason(input: ReasonerInput): Promise<ReasonerOutput>;
+}
+
+export interface ReasonerInput {
+  request: DecisionRequest;
+  context: DecisionContext;
+}
+
+/**
+ * Everything a reasoner contributes toward a decision. DecisionEngine
+ * combines this with pipeline-level concerns (audit trail, event
+ * publishing, memory persistence) that remain its own responsibility,
+ * keeping reasoners free of orchestration duties.
+ */
+export interface ReasonerOutput {
+  /** Normalized 0-100 score driving the APPROVED / MANUAL_REVIEW / REJECTED threshold. */
+  score: number;
+  status: DecisionResult['status'];
+  primaryRecommendation: Recommendation;
+  alternatives: AlternativeRecommendation[];
+  evidence: Evidence[];
+  traceSteps: ReasoningTrace['steps'];
+  factors?: DecisionFactors;
+}
+
+/**
+ * Public contract for the Reasoner Registry — the runtime plugin host
+ * for IDecisionReasoner implementations. Mirrors the discovery pattern
+ * already established by IAgentRegistry and ICapabilityRegistry.
+ */
+export interface IReasonerRegistry {
+  register(reasoner: IDecisionReasoner): void;
+  unregister(capability: AgentCapability): boolean;
+  getReasonerForDecisionType(decisionType: string, capability: AgentCapability): IDecisionReasoner | undefined;
+  getReasonerByCapability(capability: AgentCapability): IDecisionReasoner | undefined;
+  listReasoners(): IDecisionReasoner[];
+}
+
+/**
+ * Configuration-driven mapping from a DecisionRequest's `decisionType`
+ * string to the AgentCapability required to service it. Lives in
+ * config/decisionCapabilityMap.ts rather than as a hardcoded switch
+ * inside DecisionEngineService, per AI_ENGINEERING_RULES.md Section 18
+ * ("Everything configurable belongs inside /config").
+ */
+export interface DecisionCapabilityMapping {
+  decisionType: string;
+  capability: AgentCapability;
+  description: string;
+}
+
+/**
+ * A single weighted input into the Confidence Scoring Framework. Kept
+ * distinct from DecisionFactors (the explainability-facing shape) so
+ * reasoners can build one and derive the other.
+ */
+export interface ConfidenceWeightInput {
+  name: string;
+  /** Raw score for this factor, 0-100. */
+  score: number;
+  /** Relative weight, any positive number — normalized internally. */
+  weight: number;
+  influence: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL';
+  description: string;
 }
