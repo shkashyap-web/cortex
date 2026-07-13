@@ -24,3 +24,75 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* ---------------------------------------------------------------- */
+/* Enterprise scrollbar utility                                      */
+/* ---------------------------------------------------------------- */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(161, 161, 170, 0.25) transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: rgba(161, 161, 170, 0.25);
+  border-radius: 999px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(161, 161, 170, 0.4);
+}
+
+/* ---------------------------------------------------------------- */
+/* Boot sequence + micro-interaction animations                      */
+/* ---------------------------------------------------------------- */
+@keyframes cortex-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes cortex-fade-in-scale {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes cortex-pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.35); }
+  70% { box-shadow: 0 0 0 12px rgba(16, 185, 129, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+@keyframes cortex-shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+@keyframes cortex-check-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.animate-cortex-fade-in {
+  animation: cortex-fade-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.animate-cortex-fade-in-scale {
+  animation: cortex-fade-in-scale 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.animate-cortex-pulse-ring {
+  animation: cortex-pulse-ring 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+.animate-cortex-check-in {
+  animation: cortex-check-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Skeleton loader block */
+.skeleton-block {
+  background: linear-gradient(
+    90deg,
+    rgba(63, 63, 70, 0.35) 25%,
+    rgba(82, 82, 91, 0.45) 37%,
+    rgba(63, 63, 70, 0.35) 63%
+  );
+  background-size: 400px 100%;
+  animation: cortex-shimmer 1.4s ease-in-out infinite;
+}

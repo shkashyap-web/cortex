@@ -462,6 +462,30 @@ Milestone 2
 Milestone 3
 ✅ Complete
 
-Next Target
+## [Unreleased] — Enterprise UI / Boot Experience
+### Added
+- Full application boot flow: CORTEX Splash → Enterprise Login → Initialization
+  screen → Executive Dashboard, gated via `components/boot/BootSequence.tsx`
+  and persisted per-session via `sessionStorage`.
+- `components/boot/CortexSplash.tsx`, `EnterpriseLogin.tsx`,
+  `InitializationScreen.tsx` (Screens 1–3 of the enterprise UX flow).
+- `components/CommandPalette.tsx` — global `⌘K`/`Ctrl+K` workspace search and
+  keyboard navigation, sourced from the existing `WorkspaceRegistryService`.
+- `components/AICopilot.tsx` — persistent, collapsible right-side AI assistant
+  with suggested prompts and demo responses.
+- Notification Center dropdown and working global search trigger in `Topbar.tsx`.
+- Boot/micro-interaction animation utilities and scrollbar styling in
+  `app/globals.css`.
 
-Milestone 4
+### Changed
+- `app/layout.tsx` now wraps `Shell` in `BootSequence`.
+- `components/Topbar.tsx`: search box now opens the Command Palette instead of
+  being a disabled placeholder; notifications bell now opens a live dropdown.
+- `components/Shell.tsx`: renders `AICopilot` as a persistent panel.
+
+### Notes
+- Presentation-only milestone. No backend services, types, or folder structure
+  were modified, renamed, or moved.
+- Verified with `npx tsc --noEmit` (0 errors) and `npx eslint` on all new/
+  modified files (0 errors/warnings; pre-existing repo-wide lint warnings
+  elsewhere are untouched).

@@ -306,3 +306,57 @@ Continue development from the current repository state.
 
 Do not redesign the existing architecture unless explicitly instructed.
 
+---
+
+# Milestone: Enterprise UI / Boot Experience — Complete
+
+## Summary
+Implemented the enterprise application shell experience on top of the
+existing Sidebar/Topbar/RBAC/WorkspaceRegistry system: Splash → Login →
+Initialization → Executive Dashboard, plus a global Command Palette and a
+persistent AI Copilot panel. Backend/service layer untouched.
+
+## New Files
+- components/boot/BootSequence.tsx
+- components/boot/CortexSplash.tsx
+- components/boot/EnterpriseLogin.tsx
+- components/boot/InitializationScreen.tsx
+- components/AICopilot.tsx
+- components/CommandPalette.tsx
+
+## Modified Files
+- app/layout.tsx
+- app/globals.css
+- components/Topbar.tsx
+- components/Shell.tsx
+
+## Integration Points
+- EnterpriseLogin → useRBAC().switchRole (existing hook, unmodified).
+- CommandPalette → workspaceRegistryService.getAuthorizedWorkspaces() (existing service, unmodified).
+- BootSequence → sessionStorage key `cortex.session.v1` (new, additive, client-only).
+
+## Verification
+- `npx tsc --noEmit`: 0 errors.
+- `npx eslint` on all new/modified files: 0 errors, 0 warnings.
+- Full-repo `npx eslint .`: only pre-existing warnings/errors in files untouched
+  this session (Sidebar.tsx `any`, DecisionEngine.ts `any`, etc.) — none
+  introduced by this milestone.
+- `next build` in the Claude sandbox fails on the `Geist_Mono` Google Fonts
+  fetch (network egress restriction specific to that sandbox). This is not a
+  code defect and does not apply to a normal local/CI environment with
+  internet access; no action taken on it per instruction.
+
+## Known Issues (unchanged from prior milestones)
+- `config/agents.ts`: `fraud-guardian` `supportedEntities` still contains the
+  invalid `Transaction` entity type (pre-existing, not touched).
+- Missing data modules for Customer/MSME/Fraud/DigitalTwin/KnowledgeGraph/
+  Simulation services remain unimplemented, by design — workspace pages using
+  them should continue to rely on their existing meaningful placeholder/mock
+  data until those milestones are explicitly requested.
+
+## Next Session Objective
+Continue enterprise UI polish per the original brief: flesh out remaining
+sidebar workspaces (Knowledge Graph, Digital Twins, Simulation Studio,
+Explainability Center, Reports) to the same production-grade standard as
+Overview/Executive, using existing mock data — still presentation-only,
+still no backend changes unless explicitly requested.

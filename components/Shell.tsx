@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation';
 import { ShieldAlert } from 'lucide-react';
 import Sidebar from './Sidebar';
 import Topbar from './Topbar';
+import AICopilot from './AICopilot';
 import { useWorkspace } from '@/hooks/useWorkspace';
 import { workspaceRegistryService } from '@/services/workspace/WorkspaceRegistry';
 
@@ -67,6 +68,9 @@ export const Shell: React.FC<{ children: React.ReactNode }> = ({ children }) => 
           )}
         </main>
       </div>
+
+      {/* Persistent right-side AI Copilot */}
+      <AICopilot />
     </div>
   );
 };
